@@ -120,10 +120,11 @@ function(OpenSimAddLibrary)
 
     # RPATH (so that libraries find library dependencies)
     if(${OPENSIM_USE_INSTALL_RPATH})
-        # TODO @loader_path only makes sense on macOS, so we need to revisit
-        # for Linux (use $ORIGIN).
-
-        set(run_path_list "\@loader_path/")
+        if(APPLE)
+            set(run_path_list "\@loader_path/")
+        else()
+            set(run_path_list "$ORIGIN/")
+        endif()
         # TODO if/when Simbody and BTK libraries are installed in their own
         # directories (not beside OpenSim libraries), we will have to add the
         # following (also for BTK; this commented code has not been tested):
@@ -282,8 +283,11 @@ function(OpenSimAddApplication)
 
     # RPATH (so that the executable finds libraries without using env. vars).
     if(${OPENSIM_USE_INSTALL_RPATH})
-        # TODO @executable_path only makes sense on macOS, so we need to revisit
-        # for Linux (use $ORIGIN).
+        if(APPLE)
+            set(rpath_macro "\@executable_path")
+        else()
+            set(rpath_macro "$ORIGIN")
+        endif()
 
         # bin_dir_to_install_dir is most likely "../"
         file(RELATIVE_PATH bin_dir_to_install_dir
@@ -292,7 +296,7 @@ function(OpenSimAddApplication)
         set(bin_dir_to_lib_dir
             "${bin_dir_to_install_dir}${CMAKE_INSTALL_LIBDIR}")
         set_property(TARGET ${OSIMADDAPP_NAME} APPEND PROPERTY
-            INSTALL_RPATH "\@executable_path/${bin_dir_to_lib_dir}"
+            INSTALL_RPATH "${rpath_macro}/${bin_dir_to_lib_dir}"
             )
     endif()
 
@@ -303,7 +307,7 @@ endfunction()
 # build and install directories. This is a Windows specific function enabled 
 # only for Windows platform. Intention is to allow runtime loader to find all 
 # the required DLLs without need for editing PATH variable.
-function(CopyDependencyDLLsForWin DEP_NAME DEP_INSTALL_DIR)
+function(OpenSimCopyDependencyDLLsForWin DEP_NAME DEP_INSTALL_DIR)
     # On Windows, copy dlls into OpenSim binary directory.
     if(WIN32)
         file(GLOB_RECURSE DLLS ${DEP_INSTALL_DIR}/*.dll)

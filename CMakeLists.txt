@@ -90,16 +90,13 @@ set(SIMBODY_HOME $ENV{SIMBODY_HOME} CACHE
     PATH "The location of the Simbody installation to use; you can change this. Set as empty to let CMake search for Simbody automatically.")
 
 # TODO rename to OPENSIM_COPY_DEPENDENCIES and handle BTK.
-option(OPENSIM_COPY_SIMBODY "Copy Simbody headers and libraries into the
-OpenSim installation. This way, you can treat OpenSim and Simbody as one
-package, and you only need to set environment variables (e.g., PATH,
-LD_LIBRARY_PATH, DYLD_LIBRARY_PATH) for OpenSim.  On Windows, this also copies
-Simbody dll's and exe's into the OpenSim build directory, so that you don't
-need to set PATH to run OpenSim tests and examples; this is done via the
-SimbodyFiles project. If OFF, you likely must set those environment variables
-for both OpenSim and Simbody. To make a distributable installation on macOS, 
-this should be set to ON to avoid using absolute paths for RPATHs to Simbody
-libraries." ON)
+option(OPENSIM_COPY_DEPENDENCIES "Copy Simbody and BTK into the OpenSim
+installation. This allows you to redistribute the OpenSim installation to other
+computers. If installing into system-wide directories, or packaging OpenSim for
+UNIX systems, you may want to set this to OFF. On macOS, setting this to ON
+avoids using absolute paths for RPATHs to Simbody and BTK shared libraries. On
+Windows, Simbody and BTK dll's are copied into the OpenSim build directory
+regardless of this option's value." ON)
 
 option(BUILD_API_ONLY "Build/install only headers, libraries,
 wrapping, tests; not applications (opensim, ik, rra, etc.)." OFF)
@@ -463,7 +460,7 @@ endif()
 ## RPATH 
 # If it is necesasry to not put RPATHS in the installed binaries, set
 # set CMAKE_SKIP_INSTALL_RPATH to OFF.
-if(APPLE)
+if(UNIX)
     # CMake 2.8.12 introduced the ability to set RPATH for shared libraries
     # on OSX. This helps executables find the libraries they depend on
     # without having to set the DYLD_LIBRARY_PATH environment variable. 
@@ -475,7 +472,7 @@ if(APPLE)
     ## On Linux, this variable has no effect.
     set(CMAKE_MACOSX_RPATH ON)
 
-    if(NOT OPENSIM_COPY_SIMBODY)
+    if(NOT OPENSIM_COPY_DEPENDENCIES)
         # Add the automatically determined parts of the RPATH which point
         # to directories outside the build tree to the install RPATH.
         # If we are copying Simbody into OpenSim's installation, then
@@ -495,14 +492,6 @@ if(APPLE)
     if("${isSystemDir}" STREQUAL "-1")
         set(OPENSIM_USE_INSTALL_RPATH TRUE)
     endif()
-endif()
-## Add rpath to the binaries on Linux.
-## Note -- The binaries may not be relocatable because the rpath added here is
-##         absolute. 
-if(PLATFORM_NAME MATCHES Linux)
-    set(CMAKE_INSTALL_RPATH
-       "${CMAKE_INSTALL_RPATH};${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
-    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 endif()
 
 set(OPENSIM_DEPENDENCIES_DIR 
@@ -525,18 +514,19 @@ if(WITH_BTK)
                  HINTS "${OPENSIM_DEPENDENCIES_DIR}/BTK/share/btk-0.4dev")
     include(${BTK_USE_FILE})
     add_definitions(-DWITH_BTK)
-    CopyDependencyDLLsForWin(BTK ${BTK_INSTALL_PREFIX})
-    # TODO this should be handled separately between macOS and Linux.
+    OpenSimCopyDependencyDLLsForWin(BTK ${BTK_INSTALL_PREFIX})
+    # TODO this should be removed once we copying shared libraries into the
+    # python package is merged.
     set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH};${BTK_LIBRARY_DIRS}")
-endif()
-
-if(NOT SIMBODY_HOME AND OPENSIM_DEPENDENCIES_DIR)
-    set(SIMBODY_HOME "${OPENSIM_DEPENDENCIES_DIR}/simbody")
 endif()
 
 
 # Find Simbody.
 # -------------
+
+if(NOT SIMBODY_HOME AND OPENSIM_DEPENDENCIES_DIR)
+    set(SIMBODY_HOME "${OPENSIM_DEPENDENCIES_DIR}/simbody")
+endif()
 # As of Simbody 3.4, Simbody has a SimbodyConfig.cmake file, which is a
 # preferred way to find Simbody over the previous FindSimbody.cmake script.
 # NO_MODULE means we will not allow the use of a FindSimbody.cmake script.
@@ -606,88 +596,96 @@ endif()
 # -----------------------------------------------------------
 include_directories("${Simbody_INCLUDE_DIR}")
 
+# On Windows, we must copy Simbody libraries to the OpenSim build directory
+# so that the tests and examples can run without modifying the PATH
+# (that is, put Simbody's dll's in the same directory as OpenSim's
+# executables and libraries).
+if(WIN32)
+    file(GLOB SIMBODY_DLL_FILES ${Simbody_BIN_DIR}/*.dll)
 
-# Copy files over from the Simbody installation.
+    # This is where we're going to put these binaries.
+    set(COPIED_LIB_FILES)
+    foreach(LIBF ${SIMBODY_DLL_FILES})
+        get_filename_component(LIBF_ROOT ${LIBF} NAME)
+        set(COPIED_LIB_FILES ${COPIED_LIB_FILES}
+            "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${LIBF_ROOT}")
+    endforeach()
+
+    # This target depends on the destination copies of the Simbody files
+    # (in the binary build directory).  Those are produced by the OUTPUT
+    # custom command below, which depends on the source files from the
+    # Simbody installation directory.
+    add_custom_target(SimbodyFiles ALL
+        DEPENDS Simbody_CONFIG_check ${COPIED_LIB_FILES})
+    set_target_properties(SimbodyFiles
+        PROPERTIES PROJECT_LABEL "Library - Simbody Files")
+
+    foreach(LIBF ${SIMBODY_DLL_FILES})
+        get_filename_component(LIBF_ROOT ${LIBF} NAME)
+        set(COPIED_LIBF "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${LIBF_ROOT}")
+        file(TO_NATIVE_PATH "${LIBF}" LIBF_SRC)
+        file(TO_NATIVE_PATH "${COPIED_LIBF}" LIBF_DEST)
+
+        # Copy Simbody files if they are out of date. This is invoked
+        # because the SimbodyFiles target depends on these output files.
+        add_custom_command(OUTPUT "${COPIED_LIBF}"
+            COMMAND ${CMAKE_COMMAND} -E copy "${LIBF_SRC}" "${LIBF_DEST}"
+            DEPENDS "${LIBF}"
+            COMMENT "Copy ${LIBF_SRC} -> ${LIBF_DEST}"
+            VERBATIM)
+    endforeach()
+endif()
+
+
+# Copy dependencies into OpenSim's installation.
 # ----------------------------------------------
-if(${OPENSIM_COPY_SIMBODY})
-    # TODO copy BTK as well.
+if(${OPENSIM_COPY_DEPENDENCIES})
 
     # Install Simbody headers into OpenSim installation.
     install(DIRECTORY "${Simbody_INCLUDE_DIR}/"
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/Simbody")
 
-    # Figure out which Simbody files need to be installed in the /bin
-    # directory and which in the lib directory. Executables go in /bin on all
-    # platforms.  Libraries (shared or otherwise) go in /lib, except on Windows
-    # where the ".dll" files go in bin along with executables. Anything that
-    # is only needed for programmers goes in sdk/lib.
+    # Not installing BTK headers; they are only included by our cpp files.
+
+    # Figure out which files need to be installed in the /bin directory and
+    # which in the lib directory. Executables go in /bin on all platforms.
+    # Libraries (shared or otherwise) go in /lib, except on Windows where the
+    # ".dll" files go in bin along with executables. Anything that is only
+    # needed for programmers goes in sdk/lib.
     # TODO use SimbodyConfig.cmake variables instead of these globs.
     if(WIN32)
-        file(GLOB SIMBODY_BIN_FILES
+        file(GLOB DEP_BIN_FILES
             ${Simbody_BIN_DIR}/*.dll
-            ${Simbody_BIN_DIR}/*.exe)
-        file(GLOB SIMBODY_ARCHIVE_FILES
-            ${Simbody_LIB_DIR}/*.lib)
+            ${Simbody_BIN_DIR}/*.exe
+            ${BTK_INSTALL_PREFIX}/bin/*.dll)
+        file(GLOB DEP_ARCHIVE_FILES
+            ${Simbody_LIB_DIR}/*.lib
+            ${BTK_LIBRARY_DIRS}/*.lib)
     else()
-        file(GLOB SIMBODY_BIN_FILES
+        file(GLOB DEP_BIN_FILES
             ${Simbody_BIN_DIR}/simbody*) # executables only (e.g., visualizer).
         # If the LIB_DIR is some common place for libraries (e.g., /usr/lib/),
         # we only want to copy over libraries that have SimTK in their name.
-        file(GLOB SIMBODY_LIB_FILES
+        file(GLOB DEP_LIB_FILES
             ${Simbody_LIB_DIR}/*SimTK*.so
             ${Simbody_LIB_DIR}/*SimTK*.so.*
-            ${Simbody_LIB_DIR}/*SimTK*.dylib)
-        file(GLOB SIMBODY_ARCHIVE_FILES
-            ${Simbody_LIB_DIR}/*SimTK*.a)
+            ${Simbody_LIB_DIR}/*SimTK*.dylib
+            ${BTK_LIBRARY_DIRS}/*BTK*.so
+            ${BTK_LIBRARY_DIRS}/*BTK*.so.*
+            ${BTK_LIBRARY_DIRS}/*BTK*.dylib)
+        file(GLOB DEP_ARCHIVE_FILES
+            ${Simbody_LIB_DIR}/*SimTK*.a
+            ${BTK_LIBRARY_DIRS}/*BTK*.a)
     endif()
 
     # Specify "PROGRAMS" rather than "FILES" so the execute bit gets set.
-    install(PROGRAMS    ${SIMBODY_BIN_FILES}
+    install(PROGRAMS    ${DEP_BIN_FILES}
             DESTINATION "${CMAKE_INSTALL_BINDIR}")
-    install(FILES       ${SIMBODY_LIB_FILES}
+    install(FILES       ${DEP_LIB_FILES}
             DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    install(FILES       ${SIMBODY_ARCHIVE_FILES}
+    install(FILES       ${DEP_ARCHIVE_FILES}
             DESTINATION "${OPENSIM_INSTALL_ARCHIVEDIR}")
 
-    # On Windows, we must copy Simbody libraries to the OpenSim build directory
-    # so that the tests and examples can run without modifying the PATH
-    # (that is, put Simbody's dll's in the same directory as OpenSim's
-    # executables and libraries).
-    if(WIN32)
-
-        # This is where we're going to put these binaries.
-        set(COPIED_LIB_FILES)
-        foreach(LIBF ${SIMBODY_BIN_FILES})
-            get_filename_component(LIBF_ROOT ${LIBF} NAME)
-            set(COPIED_LIB_FILES ${COPIED_LIB_FILES}
-                "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${LIBF_ROOT}")
-        endforeach()
-
-        # This target depends on the destination copies of the Simbody files
-        # (in the binary build directory).  Those are produced by the OUTPUT
-        # custom command below, which depends on the source files from the
-        # Simbody installation directory.
-        add_custom_target(SimbodyFiles ALL
-            DEPENDS Simbody_CONFIG_check ${COPIED_LIB_FILES})
-        set_target_properties(SimbodyFiles
-            PROPERTIES PROJECT_LABEL "Library - Simbody Files")
-
-        foreach(LIBF ${SIMBODY_BIN_FILES})
-            get_filename_component(LIBF_ROOT ${LIBF} NAME)
-            get_filename_component(LIBF_SUFFIX ${LIBF} EXT)
-            set(COPIED_LIBF "${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/${LIBF_ROOT}")
-            file(TO_NATIVE_PATH "${LIBF}" LIBF_SRC)
-            file(TO_NATIVE_PATH "${COPIED_LIBF}" LIBF_DEST)
-
-            # Copy Simbody files if they are out of date. This is invoked
-            # because the SimbodyFiles target depends on these output files.
-            add_custom_command(OUTPUT "${COPIED_LIBF}"
-                COMMAND ${CMAKE_COMMAND} -E copy "${LIBF_SRC}" "${LIBF_DEST}"
-                DEPENDS "${LIBF}"
-                COMMENT "Copy ${LIBF_SRC} -> ${LIBF_DEST}"
-                VERBATIM)
-        endforeach()
-    endif()
 endif()
 
 
